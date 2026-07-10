@@ -1,0 +1,52 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing OIDC needs a recent npm for the token exchange.
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and test
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm build
+
+      - name: Publish to npm
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [[ "$version" == *-* ]]; then
+            # Prerelease (e.g. 0.1.0-alpha.1): use the prerelease id as the dist-tag.
+            tag="${version#*-}"
+            tag="${tag%%.*}"
+          else
+            tag="latest"
+          fi
+          echo "Publishing $version under dist-tag '$tag'"
+          npm publish --provenance --access public --tag "$tag"

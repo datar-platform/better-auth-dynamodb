@@ -1,0 +1,82 @@
+{
+  "name": "@datar-platform/better-auth-dynamodb",
+  "version": "0.1.0-alpha.1",
+  "private": false,
+  "description": "A generic DynamoDB adapter for Better Auth. Bring your own store or use the built-in single-table store.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "license": "MIT",
+  "keywords": [
+    "better-auth",
+    "better-auth-adapter",
+    "dynamodb",
+    "aws",
+    "auth"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/datar-platform/better-auth-dynamodb.git"
+  },
+  "homepage": "https://github.com/datar-platform/better-auth-dynamodb#readme",
+  "bugs": {
+    "url": "https://github.com/datar-platform/better-auth-dynamodb/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.28.1",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "pnpm build",
+    "clean": "git clean -xdf .cache .turbo dist node_modules",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "lint": "eslint --flag unstable_native_nodejs_ts_config",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "DYNAMO_E2E=1 vitest run test/localstack.test.ts",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.687.0",
+    "@aws-sdk/lib-dynamodb": "^3.687.0"
+  },
+  "peerDependencies": {
+    "@better-auth/core": ">=1.5.0",
+    "better-auth": ">=1.5.0"
+  },
+  "peerDependenciesMeta": {
+    "@better-auth/core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@better-auth/core": "1.5.4",
+    "@eslint/js": "^9.38.0",
+    "@types/node": "^22.18.12",
+    "better-auth": "1.5.4",
+    "eslint": "^9.38.0",
+    "prettier": "^3.6.2",
+    "tsup": "^8.3.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.3",
+    "vitest": "^2.1.8"
+  }
+}
