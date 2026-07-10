@@ -1,5 +1,12 @@
 # @datar-platform/better-auth-dynamodb
 
+## 0.1.0
+
+First stable release. No code changes since `0.1.0-alpha.1` — the adapter, the
+built-in single-table store, the query planner, and draining pagination are all
+covered by unit and real-DynamoDB (LocalStack) end-to-end tests. Published with
+npm provenance.
+
 ## 0.1.0-alpha.1
 
 ### Patch Changes
