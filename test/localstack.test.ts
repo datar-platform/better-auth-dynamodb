@@ -220,4 +220,47 @@ describeE2E("built-in single-table store against real DynamoDB", () => {
     });
     expect(page.items).toHaveLength(0);
   }, 30_000);
+
+  it("consumeOne atomically deletes-and-returns, and won't double-consume", async () => {
+    const id = `verify-${Date.now()}`;
+    await store.put("verification", {
+      id,
+      identifier: id,
+      value: "otp-value",
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const consumed = await store.consumeOne!("verification", id);
+    expect(consumed?.value).toBe("otp-value");
+
+    // Second consume of the same id finds nothing — it was really deleted.
+    expect(await store.consumeOne!("verification", id)).toBeNull();
+    expect(await store.getById("verification", id)).toBeNull();
+  }, 30_000);
+
+  it("incrementOne atomically adds and sets in one round-trip", async () => {
+    const id = `counter-${Date.now()}`;
+    await store.put("verification", {
+      id,
+      identifier: id,
+      value: "0",
+      attempts: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const bumped = await store.incrementOne!("verification", id, {
+      increment: { attempts: 1 },
+      set: { value: "bumped" },
+    });
+    expect(bumped?.attempts).toBe(2);
+    expect(bumped?.value).toBe("bumped");
+
+    const bumpedAgain = await store.incrementOne!("verification", id, {
+      increment: { attempts: 3 },
+    });
+    expect(bumpedAgain?.attempts).toBe(5);
+  }, 30_000);
 });

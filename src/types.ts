@@ -72,6 +72,30 @@ export interface DynamoStore {
   }): Promise<number | null>;
 
   /**
+   * Optional atomic single-use consume: delete the record with the given `id`
+   * and return what was deleted (or `null` if it was already gone), in one
+   * operation. Better Auth's email-OTP/verification-token flows require this
+   * for correctness under concurrent verify attempts. When a store doesn't
+   * provide it, the adapter falls back to a non-atomic get-then-delete.
+   */
+  consumeOne?(model: string, id: string): Promise<StoreItem | null>;
+
+  /**
+   * Optional atomic increment/set: apply `increment` (field -> delta) and
+   * `set` (field -> value) to the record with the given `id` in one operation
+   * and return the updated record (or `null` if it doesn't exist). Better
+   * Auth's guarded-counter flows (e.g. rate-limit style attempt counters)
+   * require this for correctness under concurrent updates. When a store
+   * doesn't provide it, the adapter falls back to a non-atomic
+   * get-then-merge-then-update.
+   */
+  incrementOne?(
+    model: string,
+    id: string,
+    req: { increment: Record<string, number>; set?: StoreItem },
+  ): Promise<StoreItem | null>;
+
+  /**
    * Optional schema generator, wired to the Better Auth CLI `generate` command.
    * The built-in store emits a portable CloudFormation template; a custom store
    * may emit whatever provisioning artifact fits its physical layout.

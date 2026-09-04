@@ -5,6 +5,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 import type { IndexMap } from "../../index-map";
@@ -124,6 +125,58 @@ export function createSingleTableStore(
       await doc.send(
         new DeleteCommand({ TableName: tableName, Key: primaryKey(model, id) }),
       );
+    },
+
+    async consumeOne(model, id) {
+      const res = await doc.send(
+        new DeleteCommand({
+          TableName: tableName,
+          Key: primaryKey(model, id),
+          ReturnValues: "ALL_OLD",
+        }),
+      );
+      return stripReserved(res.Attributes);
+    },
+
+    async incrementOne(model, id, { increment, set }) {
+      const names: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      const addClauses: string[] = [];
+      const setClauses: string[] = [];
+      let i = 0;
+      for (const [field, delta] of Object.entries(increment)) {
+        const nameKey = `#f${i}`;
+        const valueKey = `:v${i}`;
+        names[nameKey] = field;
+        values[valueKey] = delta;
+        addClauses.push(`${nameKey} ${valueKey}`);
+        i++;
+      }
+      for (const [field, value] of Object.entries(set ?? {})) {
+        const nameKey = `#f${i}`;
+        const valueKey = `:v${i}`;
+        names[nameKey] = field;
+        values[valueKey] = value;
+        setClauses.push(`${nameKey} = ${valueKey}`);
+        i++;
+      }
+      const expression = [
+        setClauses.length ? `SET ${setClauses.join(", ")}` : null,
+        addClauses.length ? `ADD ${addClauses.join(", ")}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const res = await doc.send(
+        new UpdateCommand({
+          TableName: tableName,
+          Key: primaryKey(model, id),
+          UpdateExpression: expression,
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ReturnValues: "ALL_NEW",
+        }),
+      );
+      return stripReserved(res.Attributes);
     },
 
     async queryIndex({ model, index, key, cursor }): Promise<QueryPage> {

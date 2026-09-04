@@ -1,5 +1,27 @@
 # @datar-platform/better-auth-dynamodb
 
+## 0.1.1
+
+### Patch Changes
+
+- Implemented `consumeOne` and `incrementOne` on the adapter and the built-in
+  single-table store. Better Auth's core adapter factory (`@better-auth/core`
+  1.7.x) requires `consumeOne` for atomic single-use credential consumption —
+  used by the email-OTP verify flow — and `incrementOne` for atomic guarded
+  counter updates. Without them, any consumer on better-auth >=1.7 hit
+  `BetterAuthError: Adapter "dynamodb" must implement consumeOne for atomic
+single-use credential consumption` the first time a plugin exercised that
+  path (e.g. `emailOTP().signIn`).
+- `consumeOne` is implemented on the built-in store as a native
+  `DeleteCommand` with `ReturnValues: "ALL_OLD"` (atomic delete-and-return);
+  `incrementOne` as a native `UpdateCommand` with `ADD`/`SET` expressions and
+  `ReturnValues: "ALL_NEW"`.
+- Both are optional on the `DynamoStore` interface — a custom store that
+  doesn't implement them still works via a non-atomic get-then-write fallback
+  in the adapter, so this is not a breaking change for existing custom
+  stores.
+- Added LocalStack e2e coverage for both.
+
 ## 0.1.0
 
 First stable release. No code changes since `0.1.0-alpha.1` — the adapter, the
