@@ -32,6 +32,12 @@ export { matchesResidual } from "./pagination";
 export { createSingleTableStore } from "./stores/default/single-table-store";
 export type { SingleTableStoreOptions } from "./stores/default/single-table-store";
 export { deriveIndexMap } from "./stores/default/derive-index-map";
+export { migrateKeys } from "./stores/default/migrate";
+export type {
+  MigrateKeysOptions,
+  MigrationReport,
+  UniquenessConflict,
+} from "./stores/default/migrate";
 export {
   buildTableDefinition,
   ensureSchema,

@@ -85,6 +85,40 @@ it. Reads treat it as _logical_ expiry too: DynamoDB reaps lazily, often a day
 or two late, so without that an expired session would keep working until AWS got
 round to deleting it.
 
+### Upgrading from 0.1.x
+
+0.2.0 changed the physical key format, so rows written by 0.1.x survive but are
+no longer found by any lookup. Recreating the table is fine in development; if
+it holds real users, migrate it instead:
+
+```ts
+import {
+  deriveIndexMap,
+  migrateKeys,
+} from "@datar-platform/better-auth-dynamodb";
+import { getAuthTables } from "better-auth/db";
+
+const indexMap = deriveIndexMap(getAuthTables(betterAuthOptions));
+
+// Look before you leap: a dry run writes nothing, and names any duplicate that
+// would block the migration.
+console.log(await migrateKeys({ tableName, indexMap, client, dryRun: true }));
+
+await migrateKeys({ tableName, indexMap, client });
+```
+
+It rewrites each row into the current format and backfills the uniqueness
+markers 0.1.x never wrote, so existing rows end up protected rather than merely
+readable. Nothing happens automatically on upgrade — rewriting an auth table on
+first boot is not a decision this package makes for you — and running it on a
+table with nothing to migrate is a no-op, so it is safe in a deploy step and
+safe to run twice.
+
+If two old rows claim the same `unique` value, it stops before writing anything
+and reports their ids. 0.1.x enforced uniqueness in Better Auth's application
+layer, which two concurrent sign-ups could both pass; deciding which row keeps
+the email is yours to make, not the migration's.
+
 ### Uniqueness
 
 Fields the Better Auth schema marks `unique` — `user.email`, `session.token`,

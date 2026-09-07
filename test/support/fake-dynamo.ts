@@ -41,6 +41,8 @@ export interface FakeDynamo {
   commands(): { type: string; input: any }[];
   /** Force the next `n` writes to fail as if they lost a race. */
   failNextWrites(n: number): void;
+  /** Insert a raw row, bypassing the store — for seeding legacy-format data. */
+  seed(item: Item): void;
 }
 
 const keyOf = (item: Item): string => `${String(item[PK])} ${String(item[SK])}`;
@@ -111,6 +113,23 @@ export function createFakeDynamo(): FakeDynamo {
     switch (type) {
       case "GetCommand":
         return { Item: store.get(keyOf(input.Key)) };
+
+      case "ScanCommand": {
+        // Paged two at a time, so callers that forget to drain are caught.
+        const all = [...store.values()];
+        const start = input.ExclusiveStartKey
+          ? all.findIndex((i) => keyOf(i) === keyOf(input.ExclusiveStartKey)) +
+            1
+          : 0;
+        const slice = all.slice(start, start + 2);
+        const last = slice.at(-1);
+        const more = start + slice.length < all.length;
+        return {
+          Items: slice,
+          LastEvaluatedKey:
+            more && last ? { [PK]: last[PK], [SK]: last[SK] } : undefined,
+        };
+      }
 
       case "PutCommand": {
         const key = keyOf(input.Item);
@@ -222,6 +241,9 @@ export function createFakeDynamo(): FakeDynamo {
     commands: () => seen,
     failNextWrites: (n) => {
       failures = n;
+    },
+    seed: (item) => {
+      store.set(keyOf(item), { ...item });
     },
   };
 }

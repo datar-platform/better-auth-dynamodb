@@ -1,6 +1,6 @@
 {
   "name": "@datar-platform/better-auth-dynamodb",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "description": "A generic DynamoDB adapter for Better Auth. Bring your own store or use the built-in single-table store.",
   "type": "module",

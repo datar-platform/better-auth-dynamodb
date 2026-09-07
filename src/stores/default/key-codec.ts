@@ -36,9 +36,9 @@ const SK_CONST = "#";
 const RESERVED_PREFIX = "__ba_";
 
 /** Row-kind discriminators. Fixed literals, never derived from user data. */
-const ENTITY_PREFIX = "E";
+export const ENTITY_PREFIX = "E";
 const LOOKUP_PREFIX = "L";
-const UNIQUE_PREFIX = "U";
+export const UNIQUE_PREFIX = "U";
 
 /** DynamoDB's own key size limits. */
 const MAX_PARTITION_KEY_BYTES = 2048;

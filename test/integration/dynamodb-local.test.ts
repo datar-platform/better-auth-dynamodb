@@ -1,4 +1,5 @@
 import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { betterAuth } from "better-auth";
 import { getAuthTables } from "better-auth/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -10,6 +11,7 @@ import {
   deriveIndexMap,
   dynamoAdapter,
   ensureSchema,
+  migrateKeys,
   UniqueConstraintError,
 } from "../../src/index";
 import { startDynamoLocal, type DynamoLocal } from "../support/dynamodb-local";
@@ -380,4 +382,84 @@ describe("built-in single-table store against real DynamoDB", () => {
     });
     expect(page.items.map((i) => i.id)).toContain(id);
   }, 30_000);
+
+  it("migrates a 0.1.x row back into service, markers and all", async () => {
+    // Written exactly as 0.1.x did: keys joined on a bare "#", no row-kind
+    // prefix, no uniqueness marker. Hand-built through the raw client, because
+    // the point is that the current store would never produce this.
+    const id = `legacy-${Date.now()}`;
+    const email = `legacy-${Date.now()}@example.com`;
+    const now = new Date().toISOString();
+    await dynamo.documentClient.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          id,
+          email,
+          name: "Legacy User",
+          emailVerified: true,
+          createdAt: now,
+          updatedAt: now,
+          __ba_pk: `user#${id}`,
+          __ba_sk: "#",
+          __ba_tpk: "user",
+          __ba_tsk: `${now}#${id}`,
+          __ba_g1pk: `user#by_email#${email}`,
+          __ba_g1sk: id,
+        },
+      }),
+    );
+
+    // The row is physically there, and completely invisible to this version.
+    expect(await store.getById("user", id)).toBeNull();
+
+    const indexMap = deriveIndexMap(getAuthTables(AUTH_OPTIONS));
+    const dry = await migrateKeys({
+      tableName: TABLE,
+      indexMap,
+      documentClient: dynamo.documentClient,
+      dryRun: true,
+    });
+    expect(dry.migrated).toBeGreaterThanOrEqual(1);
+    expect(dry.conflicts).toEqual([]);
+    // A dry run really is dry.
+    expect(await store.getById("user", id)).toBeNull();
+
+    const report = await migrateKeys({
+      tableName: TABLE,
+      indexMap,
+      documentClient: dynamo.documentClient,
+    });
+    expect(report.conflicts).toEqual([]);
+    expect(report.migrated).toBeGreaterThanOrEqual(1);
+
+    // Readable by id...
+    expect(await store.getById("user", id)).toMatchObject({ id, email });
+    // ...and by the real GSI, which is what a sign-in actually uses.
+    const page = await store.queryIndex({
+      model: "user",
+      index: "by_email",
+      key: { email },
+    });
+    expect(page.items.map((i) => i.id)).toContain(id);
+
+    // And the backfilled marker now protects a value 0.1.x left unguarded.
+    await expect(
+      store.put("user", {
+        id: `${id}-clash`,
+        email,
+        emailVerified: true,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+
+    // Running it again finds nothing left to do.
+    const second = await migrateKeys({
+      tableName: TABLE,
+      indexMap,
+      documentClient: dynamo.documentClient,
+    });
+    expect(second.noop).toBe(true);
+  }, 60_000);
 });

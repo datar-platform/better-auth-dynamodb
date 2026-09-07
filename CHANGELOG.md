@@ -1,5 +1,44 @@
 # @datar-platform/better-auth-dynamodb
 
+## 0.2.1
+
+### Added
+
+- **`migrateKeys()` — an upgrade path from 0.1.x that does not mean recreating
+  the table.** 0.2.0 changed the physical key format, so rows written by 0.1.x
+  survive but stop being found. For a development table, recreating it is fine;
+  for one holding real users it means an outage. This rewrites the rows in
+  place instead, and backfills the uniqueness markers 0.1.x never wrote — so
+  existing rows end up protected, not merely readable.
+
+  ```ts
+  import {
+    deriveIndexMap,
+    migrateKeys,
+  } from "@datar-platform/better-auth-dynamodb";
+  import { getAuthTables } from "better-auth/db";
+
+  const indexMap = deriveIndexMap(getAuthTables(betterAuthOptions));
+
+  // Look first. A dry run writes nothing and names any duplicate that would
+  // block the migration.
+  console.log(await migrateKeys({ tableName, indexMap, client, dryRun: true }));
+
+  await migrateKeys({ tableName, indexMap, client });
+  ```
+
+  - **Explicit, never automatic.** Upgrading the package changes nothing on its
+    own; rewriting an auth table on first boot is not a decision a library
+    should make for you.
+  - **A no-op when there is nothing to do**, so it is safe in a deploy step and
+    safe to run twice. A table created on 0.2.0+ is left alone.
+  - **Stops before writing if two old rows claim the same `unique` value.**
+    0.1.x enforced uniqueness in Better Auth's application layer, which two
+    concurrent sign-ups could both pass; choosing which row keeps the email is
+    not a migration's decision. The report names the conflicting ids.
+  - Writes each new row before deleting the old one, so an interrupted run
+    leaves both rather than neither.
+
 ## 0.2.0
 
 ### Breaking
