@@ -35,7 +35,11 @@ jobs:
       - name: Build and test
         run: |
           pnpm typecheck
+          pnpm lint
           pnpm test
+          # A release that has not been proven against a real DynamoDB is not
+          # worth publishing. Testcontainers starts DynamoDB Local itself.
+          pnpm test:integration
           pnpm build
 
       - name: Publish to npm

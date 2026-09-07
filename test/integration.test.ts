@@ -55,7 +55,11 @@ describe("dynamoAdapter — end-to-end via Better Auth (in-memory store)", () =>
     secret: "better-auth-dynamodb-test-secret-0123456789",
     baseURL: "http://localhost:3000",
     emailAndPassword: { enabled: true },
-    database: dynamoAdapter({ store }), // indexMap auto-derived from schema
+    // indexMap auto-derived from schema. `unsafeAllowScan` is on because this
+    // suite deliberately exercises predicates no index can serve (e.g.
+    // `identifier starts_with`) to pin the residual-filtering contract;
+    // production defaults still reject those shapes.
+    database: dynamoAdapter({ store, unsafeAllowScan: true }),
   });
 
   const email = "ada@example.com";

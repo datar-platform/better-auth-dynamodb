@@ -1,35 +1,29 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { betterAuth } from "better-auth";
 import { getAuthTables } from "better-auth/db";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import type { DynamoStore } from "../src/index";
+import type { DynamoStore } from "../../src/index";
 import {
   assignSlots,
   createSingleTableStore,
   deriveIndexMap,
   dynamoAdapter,
   ensureSchema,
-} from "../src/index";
+  UniqueConstraintError,
+} from "../../src/index";
+import { startDynamoLocal, type DynamoLocal } from "../support/dynamodb-local";
 
 /**
- * Exercises the built-in single-table store against a *real* DynamoDB (LocalStack
- * or DynamoDB Local). The in-memory store used elsewhere cannot prove the parts
- * that only exist once a real GSI is involved: physical key encoding, slot
- * assignment, `Select: "COUNT"`, and — critically — `LastEvaluatedKey` draining
- * across a real page boundary.
+ * Exercises the built-in single-table store against a *real* DynamoDB (AWS's
+ * own DynamoDB Local, started by Testcontainers). The in-memory doubles used
+ * elsewhere cannot prove the parts that only exist once a real GSI and a real
+ * transaction engine are involved: physical key encoding, slot assignment,
+ * `Select: "COUNT"`, `LastEvaluatedKey` draining across a genuine page
+ * boundary, and `TransactWriteItems` actually rejecting a duplicate.
  *
- * Opt-in, because it needs a running DynamoDB:
- *
- *   docker compose up -d
- *   AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test pnpm test:e2e
+ *   pnpm test:integration
  */
-const ENDPOINT = process.env.DYNAMODB_ENDPOINT ?? "http://localhost:4566";
-const REGION = process.env.AWS_REGION ?? "us-east-1";
-
-const describeE2E = process.env.DYNAMO_E2E === "1" ? describe : describe.skip;
-
-/** A fresh table per run, so repeated runs never see each other's rows. */
 const TABLE = `better-auth-e2e-${process.pid}`;
 
 const AUTH_OPTIONS = {
@@ -37,33 +31,29 @@ const AUTH_OPTIONS = {
   emailAndPassword: { enabled: true },
 } as const;
 
+let dynamo: DynamoLocal;
+
 /** Built through a factory so `auth`'s inferred option type survives. */
 const createAuth = () =>
   betterAuth({
     ...AUTH_OPTIONS,
     database: dynamoAdapter({
       tableName: TABLE,
-      region: REGION,
-      endpoint: ENDPOINT,
+      documentClient: dynamo.documentClient,
     }),
   });
 
-describeE2E("built-in single-table store against real DynamoDB", () => {
+describe("built-in single-table store against real DynamoDB", () => {
   let store: DynamoStore;
+  let client: DynamoDBClient;
   let auth: ReturnType<typeof createAuth>;
 
   beforeAll(async () => {
-    const client = new DynamoDBClient({
-      region: REGION,
-      endpoint: ENDPOINT,
-      credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "test",
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "test",
-      },
-    });
+    dynamo = await startDynamoLocal();
+    client = dynamo.client;
 
-    // Provision using the package's own exports — the same index map the adapter
-    // derives internally, so the table matches the access patterns exactly.
+    // Provision using the package's own exports — the same index map the
+    // adapter derives internally, so the table matches the access patterns.
     const indexMap = deriveIndexMap(getAuthTables(AUTH_OPTIONS));
     await ensureSchema({
       client,
@@ -73,13 +63,16 @@ describeE2E("built-in single-table store against real DynamoDB", () => {
 
     store = createSingleTableStore({
       tableName: TABLE,
-      region: REGION,
-      endpoint: ENDPOINT,
+      documentClient: dynamo.documentClient,
       indexMap,
     });
 
     auth = createAuth();
-  }, 90_000);
+  }, 180_000);
+
+  afterAll(async () => {
+    await dynamo?.stop();
+  });
 
   it("runs a real sign-up -> sign-in -> session flow", async () => {
     const email = `e2e-${Date.now()}@example.com`;
@@ -159,10 +152,12 @@ describeE2E("built-in single-table store against real DynamoDB", () => {
     // The adapter's own drainPages must see rows beyond the first 1MB page
     // before applySort/applyWindow run — otherwise sort+offset silently operate
     // on a truncated set. Reuses the padded rows written above.
+    // `unsafeAllowScan` because listing a whole model with no `where` is
+    // exactly the access pattern the guard exists to make explicit.
     const adapter = dynamoAdapter({
       tableName: TABLE,
-      region: REGION,
-      endpoint: ENDPOINT,
+      documentClient: dynamo.documentClient,
+      unsafeAllowScan: true,
     })(AUTH_OPTIONS);
 
     const all = await adapter.findMany<{ id: string }>({
@@ -262,5 +257,127 @@ describeE2E("built-in single-table store against real DynamoDB", () => {
       increment: { attempts: 3 },
     });
     expect(bumpedAgain?.attempts).toBe(5);
+  }, 30_000);
+
+  it("rejects a duplicate unique value at the database, not the app layer", async () => {
+    const email = `dupe-${Date.now()}@example.com`;
+    await store.put("user", {
+      id: `dupe-a-${Date.now()}`,
+      email,
+      name: "First",
+      emailVerified: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    // This is the case Better Auth's check-then-insert cannot close: the
+    // constraint has to live in DynamoDB for a concurrent second writer to lose.
+    await expect(
+      store.put("user", {
+        id: `dupe-b-${Date.now()}`,
+        email,
+        name: "Second",
+        emailVerified: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+  }, 30_000);
+
+  it("lets exactly one of two concurrent sign-ups win the same email", async () => {
+    const email = `race-${Date.now()}@example.com`;
+    const attempt = () =>
+      auth.api.signUpEmail({
+        body: { email, password: "correct-horse-battery", name: "Racer" },
+      });
+
+    const results = await Promise.allSettled([attempt(), attempt()]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+
+    // And exactly one row survives, not two.
+    const page = await store.queryIndex({
+      model: "user",
+      index: "by_email",
+      key: { email },
+    });
+    expect(page.items).toHaveLength(1);
+  }, 60_000);
+
+  it("frees a unique value when its row is deleted, and reuses it", async () => {
+    const email = `recycle-${Date.now()}@example.com`;
+    const { user } = await auth.api.signUpEmail({
+      body: { email, password: "correct-horse-battery", name: "First" },
+    });
+    await store.deleteById("user", user.id);
+
+    await expect(
+      auth.api.signUpEmail({
+        body: { email, password: "correct-horse-battery", name: "Second" },
+      }),
+    ).resolves.toBeTruthy();
+  }, 60_000);
+
+  it("refuses to overwrite an existing row through create", async () => {
+    const id = `create-twice-${Date.now()}`;
+    const row = {
+      id,
+      identifier: id,
+      value: "v",
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await store.put("verification", row);
+    await expect(store.put("verification", row)).rejects.toThrow(
+      /already exists/,
+    );
+  }, 30_000);
+
+  it("stores a value containing the key delimiter without collision", async () => {
+    // Provider-supplied values reach these keys verbatim; a `#` in one must not
+    // let it be read back as another row.
+    const now = new Date().toISOString();
+    const base = { createdAt: now, updatedAt: now, providerId: "credential" };
+    await store.put("account", {
+      ...base,
+      id: `hash-a-${Date.now()}`,
+      userId: "u#1",
+      accountId: "acc-2",
+    });
+    await store.put("account", {
+      ...base,
+      id: `hash-b-${Date.now()}`,
+      userId: "u",
+      accountId: "acc#1-2",
+    });
+
+    const page = await store.queryIndex({
+      model: "account",
+      index: "by_userId",
+      key: { userId: "u#1" },
+    });
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]?.accountId).toBe("acc-2");
+  }, 30_000);
+
+  it("round-trips a value far longer than a DynamoDB key allows", async () => {
+    const identifier = `long-${"x".repeat(4000)}`;
+    const id = `long-${Date.now()}`;
+    await store.put("verification", {
+      id,
+      identifier,
+      value: "v",
+      expiresAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    // Hashed into the key, so the write succeeds and the lookup still finds it.
+    const page = await store.queryIndex({
+      model: "verification",
+      index: "by_identifier",
+      key: { identifier },
+    });
+    expect(page.items.map((i) => i.id)).toContain(id);
   }, 30_000);
 });

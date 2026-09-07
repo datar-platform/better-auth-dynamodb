@@ -10,9 +10,9 @@ const w = (
   value: CleanedWhere["value"],
   operator: CleanedWhere["operator"] = "eq",
   connector: CleanedWhere["connector"] = "AND",
-): CleanedWhere => ({ field, value, operator, connector });
+): CleanedWhere => ({ field, value, operator, connector, mode: "sensitive" });
 
-// A representative slice of Datar's map: partial keys, sort-key prefixes, order.
+// A representative access-pattern map: partial keys, sort-key prefixes, order.
 const indexMap: IndexMap = {
   user: [{ index: "byEmail", pk: ["email"] }],
   account: [
@@ -112,6 +112,36 @@ describe("planQuery", () => {
     const plan = planQuery(
       "user",
       [w("email", "a@b.co", "eq", "OR")],
+      indexMap,
+    );
+    expect(plan.kind).toBe("listByType");
+    expect(plan.residual).toHaveLength(1);
+  });
+
+  it("plans `id in [...]` as a bounded set of primary-key gets", () => {
+    // Better Auth batch-loads rows it already has ids for (an organisation's
+    // members, say). That is a multi-get, not a scan, and must not be one.
+    const plan = planQuery("user", [w("id", ["u_1", "u_2"], "in")], indexMap);
+    expect(plan).toMatchObject({ kind: "byIds", ids: ["u_1", "u_2"] });
+    expect(plan.residual).toHaveLength(0);
+  });
+
+  it("keeps other predicates residual alongside an `id in`", () => {
+    const plan = planQuery(
+      "user",
+      [w("id", ["u_1"], "in"), w("banned", true)],
+      indexMap,
+    );
+    expect(plan.kind).toBe("byIds");
+    expect(plan.residual).toHaveLength(1);
+  });
+
+  it("refuses to serve a case-insensitive equality from an index", () => {
+    // DynamoDB compares keys byte-for-byte, so an index lookup would silently
+    // miss every row whose casing differs. The clause stays residual instead.
+    const plan = planQuery(
+      "user",
+      [{ ...w("email", "ADA@EXAMPLE.COM"), mode: "insensitive" }],
       indexMap,
     );
     expect(plan.kind).toBe("listByType");

@@ -26,15 +26,15 @@ export function deriveIndexMap(schema: BetterAuthDBSchema): IndexMap {
     const patterns: AccessPattern[] = [];
     const seen = new Set<string>();
 
-    const add = (field: string) => {
+    const add = (field: string, unique = false) => {
       if (field === "id" || seen.has(field)) return;
       seen.add(field);
-      patterns.push({ index: lookupIndexName(field), pk: [field] });
+      patterns.push({ index: lookupIndexName(field), pk: [field], unique });
     };
 
     // `unique` fields first (most selective), then foreign keys, then `index`.
     for (const [field, attr] of Object.entries(table.fields)) {
-      if (attr.unique) add(field);
+      if (attr.unique) add(field, true);
     }
     for (const [field, attr] of Object.entries(table.fields)) {
       if (attr.references) add(field);

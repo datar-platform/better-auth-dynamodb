@@ -22,6 +22,14 @@ export interface AccessPattern {
    * (as `eq` clauses), and leaves the rest to residual in-memory filtering.
    */
   sk?: string[];
+  /**
+   * True when this pattern backs a *uniqueness constraint* (a schema field
+   * marked `unique`, e.g. `user.email`) rather than a plain lookup. The
+   * built-in store enforces these atomically with marker rows; a custom store
+   * may ignore the flag and fall back to Better Auth's application-layer
+   * check-then-insert.
+   */
+  unique?: boolean;
 }
 
 /** Ordered list of access patterns for a single model, most specific first. */

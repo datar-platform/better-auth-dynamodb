@@ -8,7 +8,16 @@ A generic [DynamoDB](https://aws.amazon.com/dynamodb/) adapter for [Better Auth]
 - **Bring your own store.** The adapter talks to a small `DynamoStore` seam, so
   you can back it with an existing single-table design (ElectroDB, custom key
   encoding, a shared table) without changing the adapter.
-- **Correct pagination.** `findMany`/`count` drain every page — no silent row cap.
+- **Atomic uniqueness.** `unique` fields are enforced by DynamoDB itself, in the
+  same transaction as the row — not by a check-then-insert two concurrent
+  sign-ups can both pass.
+- **Safe under concurrency.** Every row carries a revision that guards updates,
+  deletes, and single-use consumes against lost writes.
+- **No hidden scans, no silent truncation.** A query no index can serve fails
+  loudly instead of quietly reading the whole model, and pagination that hits
+  its cap throws rather than returning part of an answer.
+- **Passes Better Auth's official adapter conformance suites** against real
+  DynamoDB.
 - Zero dependencies beyond the AWS SDK.
 
 ## Install
@@ -57,6 +66,43 @@ await ensureSchema({
 You can also generate a CloudFormation template via the Better Auth CLI
 (`npx @better-auth/cli generate`) — the adapter's `createSchema` emits one sized
 to your access patterns.
+
+### Expiring sessions and verifications
+
+Nothing expires on its own. Point the adapter at your expiry field and DynamoDB
+reaps expired rows for free:
+
+```ts
+dynamoAdapter({
+  tableName: "better-auth",
+  ttl: { defaultField: "expiresAt" },
+});
+```
+
+Pass the same attribute to `ensureSchema({ ..., ttlAttribute: "__ba_ttl" })` —
+the adapter writes the attribute, but only the table setting makes AWS act on
+it. Reads treat it as _logical_ expiry too: DynamoDB reaps lazily, often a day
+or two late, so without that an expired session would keep working until AWS got
+round to deleting it.
+
+### Uniqueness
+
+Fields the Better Auth schema marks `unique` — `user.email`, `session.token`,
+`organization.slug` — get a marker row written in the same
+`TransactWriteItems` as the row itself, conditional on the marker not already
+existing. That makes uniqueness a property of the database: of two concurrent
+sign-ups for the same email, exactly one commits.
+
+Better Auth's own enforcement is a check-then-insert, which both racers can
+pass. Set `atomicUniqueness: false` to fall back to it and halve the write cost
+of creates.
+
+Two caveats worth knowing:
+
+- Markers are created by writes made on 0.2.0+. Upgrading an existing table
+  enforces uniqueness going forward; it does not find duplicates already there.
+- Do not write Better Auth rows into the table with a raw `PutItem`. Entity
+  rows, index keys, markers, and TTL attributes have to move together.
 
 ## Bring your own store
 
@@ -114,23 +160,42 @@ omit it to auto-derive from the schema.
 
 ## Configuration
 
-| Option      | Default                               | Description                                                                                       |
-| ----------- | ------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `store`     | built-in single-table store           | Storage backend (`DynamoStore`).                                                                  |
-| `indexMap`  | derived from schema                   | Access-pattern map.                                                                               |
-| `tableName` | `DYNAMODB_TABLE_NAME` → `better-auth` | Table name (built-in store).                                                                      |
-| `region`    | SDK default                           | AWS region (built-in store).                                                                      |
-| `endpoint`  | SDK default                           | Endpoint override for DynamoDB Local / LocalStack, e.g. `http://localhost:4566` (built-in store). |
-| `debugLogs` | `false`                               | Better Auth debug logging.                                                                        |
+| Option             | Default                               | Description                                                                                                                 |
+| ------------------ | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `store`            | built-in single-table store           | Storage backend (`DynamoStore`).                                                                                            |
+| `indexMap`         | derived from schema                   | Access-pattern map.                                                                                                         |
+| `tableName`        | `DYNAMODB_TABLE_NAME` → `better-auth` | Table name (built-in store).                                                                                                |
+| `region`           | SDK default                           | AWS region (built-in store).                                                                                                |
+| `endpoint`         | SDK default                           | Endpoint override for DynamoDB Local / LocalStack, e.g. `http://localhost:8000` (built-in store).                           |
+| `documentClient`   | created internally                    | Pre-built `DynamoDBDocumentClient`. Preferred in production, so your app owns credentials, region, middleware, and tracing. |
+| `atomicUniqueness` | `true`                                | Enforce `unique` fields with transactional marker rows.                                                                     |
+| `ttl`              | disabled                              | Adapter-managed DynamoDB TTL, e.g. `{ defaultField: "expiresAt" }`.                                                         |
+| `maxPages`         | `25`                                  | Cap on pages drained per query. Throws at the cap rather than returning a partial result.                                   |
+| `pageSize`         | SDK default                           | Per-request DynamoDB `Limit`. Changes request sizing only, not logical results.                                             |
+| `unsafeAllowScan`  | `false`                               | Allow queries no index can serve, which read every row of the model and filter in memory.                                   |
+| `debugLogs`        | `false`                               | Better Auth debug logging.                                                                                                  |
 
 ## Notes & limitations
 
 - IDs are strings (Better Auth generates them); `supportsNumericIds` is `false`.
 - Dates are stored as ISO strings and re-hydrated on read (`supportsDates: false`).
-- No native transactions — multi-row ops run sequentially in small batches.
+- No interactive transactions — DynamoDB has no such API, so the adapter
+  reports `transaction: false`. `TransactWriteItems` is used internally for
+  single-row atomic operations; multi-row ops run sequentially in small batches.
+- Case-insensitive equality (`mode: "insensitive"`) cannot come from an index,
+  because DynamoDB compares keys byte-for-byte. Those clauses are matched in
+  memory, so they need `unsafeAllowScan: true` unless another clause in the same
+  `where` can be served by an index.
+- Better Auth's verification cleanup issues a range-only
+  `deleteMany(expiresAt < now)`, which has no key to work from. Configure `ttl`
+  and set `verification: { disableCleanup: true }` — that is the
+  DynamoDB-shaped answer to the same problem.
 - The built-in store's derived index map keys on schema field names; custom
   `fieldName` mappings are not yet resolved in derivation (pass an explicit
   `indexMap` if you rename fields).
+- Key values longer than 256 bytes are SHA-256 hashed into the key. Lookups are
+  unaffected — both sides hash identically — but a key is no longer always
+  readable as plain text when debugging.
 
 ## License
 

@@ -13,7 +13,64 @@ const w = (
   value: CleanedWhere["value"],
   operator: CleanedWhere["operator"] = "eq",
   connector: CleanedWhere["connector"] = "AND",
-): CleanedWhere => ({ field, value, operator, connector });
+): CleanedWhere => ({ field, value, operator, connector, mode: "sensitive" });
+
+describe("drainPages", () => {
+  const pageOf = (n: number) => ({ items: [{ id: String(n) }], cursor: n + 1 });
+
+  it("drains every page rather than trusting the first", async () => {
+    const items = await drainPages((cursor) => {
+      const page = Number(cursor ?? 0);
+      return Promise.resolve(
+        page < 3 ? pageOf(page) : { items: [{ id: "last" }] },
+      );
+    });
+    expect(items).toHaveLength(4);
+  });
+
+  it("throws instead of returning a partial result at the page cap", async () => {
+    // A silently truncated auth query is a correctness bug wearing a success
+    // response, so the cap has to be loud.
+    await expect(
+      drainPages((cursor) => Promise.resolve(pageOf(Number(cursor ?? 0))), 3),
+    ).rejects.toThrow(/maxPages \(3\)/);
+  });
+
+  it("does not trip the cap when the last page fills it exactly", async () => {
+    const items = await drainPages(
+      (cursor) =>
+        Promise.resolve(
+          Number(cursor ?? 0) < 2
+            ? pageOf(Number(cursor ?? 0))
+            : { items: [{ id: "last" }] },
+        ),
+      3,
+    );
+    expect(items).toHaveLength(3);
+  });
+});
+
+describe("case-insensitive matching", () => {
+  const insensitive = (
+    field: string,
+    value: string,
+    operator: CleanedWhere["operator"] = "eq",
+  ) => ({ ...w(field, value, operator), mode: "insensitive" }) as CleanedWhere;
+
+  it("folds case for string comparisons when asked", () => {
+    const item = { email: "Ada@Example.com" };
+    expect(
+      matchesResidual(item, [insensitive("email", "ada@example.com")]),
+    ).toBe(true);
+    expect(matchesResidual(item, [w("email", "ada@example.com")])).toBe(false);
+  });
+
+  it("leaves non-string values alone", () => {
+    expect(
+      matchesResidual({ age: 36 }, [insensitive("age", 36 as never)]),
+    ).toBe(true);
+  });
+});
 
 describe("matchesResidual", () => {
   const item = { name: "Ada", age: 36, role: "admin", tags: ["x", "y"] };

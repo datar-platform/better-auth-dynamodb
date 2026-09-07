@@ -11,7 +11,18 @@ export type {
   DynamoStore,
   QueryPage,
   StoreItem,
+  TtlOptions,
 } from "./types";
+export {
+  DynamoDBAdapterError,
+  isConditionalCheckFailed,
+  isConditionalTransactionCanceled,
+  isTransactionCanceled,
+  OptimisticLockError,
+  transactionCancellationCodes,
+  UniqueConstraintError,
+  UnsupportedQueryError,
+} from "./errors";
 export type { AccessPattern, IndexMap, ModelIndexMap } from "./index-map";
 export type { QueryPlan } from "./planner";
 export { planQuery } from "./planner";
@@ -26,4 +37,4 @@ export {
   ensureSchema,
   generateSchemaFile,
 } from "./stores/default/schema";
-export { assignSlots } from "./stores/default/key-codec";
+export { assignSlots, DEFAULT_TTL_ATTRIBUTE } from "./stores/default/key-codec";

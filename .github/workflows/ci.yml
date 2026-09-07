@@ -26,25 +26,8 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
-  e2e:
+  integration:
     runs-on: ubuntu-latest
-    services:
-      localstack:
-        image: localstack/localstack:3.4
-        ports:
-          - 4566:4566
-        env:
-          SERVICES: dynamodb
-        options: >-
-          --health-cmd "curl -f http://localhost:4566/_localstack/health"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      DYNAMODB_ENDPOINT: http://localhost:4566
-      AWS_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -53,4 +36,6 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test:e2e
+      # Testcontainers starts and stops DynamoDB Local itself, so there is no
+      # service container to declare and no port to reserve.
+      - run: pnpm test:integration

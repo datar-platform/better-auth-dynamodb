@@ -51,9 +51,29 @@ describe("encodeKeys", () => {
     );
     expect(keys).toMatchObject(primaryKey("account", "a_1"));
     expect(keys[TYPE_PK]).toBe("account");
-    expect(keys[gsiPk(1)]).toBe("account#byUser#u_1");
-    expect(keys[gsiSk(1)]).toBe("credential#a_1");
-    expect(keys[gsiPk(2)]).toBe("account#byAccountId#acc_1");
+    // Keys are length-prefixed and type-tagged, so a value carrying the
+    // delimiter cannot forge another key. Asserted structurally rather than by
+    // exact string, so the format can move without rewriting the suite.
+    expect(keys[gsiPk(1)]).toBe(
+      encodeLookupQuery(
+        "account",
+        "byUser",
+        { userId: "u_1" },
+        indexMap,
+        assignment,
+      ).pkValue,
+    );
+    expect(keys[gsiSk(1)]).toContain("credential");
+    expect(keys[gsiSk(1)]).toContain("a_1");
+    expect(keys[gsiPk(2)]).toBe(
+      encodeLookupQuery(
+        "account",
+        "byAccountId",
+        { accountId: "acc_1" },
+        indexMap,
+        assignment,
+      ).pkValue,
+    );
   });
 
   it("skips a lookup index when a partition field is missing", () => {
@@ -76,8 +96,9 @@ describe("encodeLookupQuery", () => {
     expect(q).toMatchObject({
       indexName: gsiName(1),
       pkAttr: gsiPk(1),
-      pkValue: "account#byUser#u_1",
+      skAttr: gsiSk(1),
     });
+    expect(q.pkValue).toContain("u_1");
     expect(q.skPrefix).toBeUndefined();
   });
 
@@ -89,7 +110,7 @@ describe("encodeLookupQuery", () => {
       indexMap,
       assignment,
     );
-    expect(q.skPrefix).toBe("credential#");
+    expect(q.skPrefix).toBe(`s17:string:credential#`);
   });
 });
 
@@ -129,10 +150,18 @@ describe("deriveIndexMap", () => {
 
   it("derives lookup indexes from unique, references, and index fields", () => {
     const map = deriveIndexMap(schema);
-    expect(map.user).toEqual([{ index: "by_email", pk: ["email"] }]);
-    expect(map.account).toEqual([{ index: "by_userId", pk: ["userId"] }]);
+    // `unique` schema fields are flagged, so the store knows which patterns
+    // are constraints to enforce rather than plain lookups.
+    expect(map.user).toEqual([
+      { index: "by_email", pk: ["email"], unique: true },
+    ]);
+    expect(map.account).toEqual([
+      { index: "by_userId", pk: ["userId"], unique: false },
+    ]);
     // An unknown plugin model gets an index too — works out of the box.
-    expect(map.twoFactor).toEqual([{ index: "by_secret", pk: ["secret"] }]);
+    expect(map.twoFactor).toEqual([
+      { index: "by_secret", pk: ["secret"], unique: false },
+    ]);
   });
 });
 

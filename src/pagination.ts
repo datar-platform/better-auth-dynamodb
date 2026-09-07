@@ -1,6 +1,10 @@
 import type { CleanedWhere } from "@better-auth/core/db/adapter";
 
+import { DynamoDBAdapterError } from "./errors";
 import type { QueryPage, StoreItem } from "./types";
+
+/** Default cap on pages drained for one logical query. */
+export const DEFAULT_MAX_PAGES = 25;
 
 /**
  * Drain every page of a paginated store query into a single array.
@@ -9,23 +13,44 @@ import type { QueryPage, StoreItem } from "./types";
  * so a single `.query()` can silently return a partial result. Draining here —
  * rather than trusting one page — is what makes `findMany`/`count` correct
  * (and removes the old adapter's implicit 10 000-row cap).
+ *
+ * Draining is bounded by `maxPages`. Hitting the cap throws: an auth query that
+ * silently returns some of its rows is a correctness bug wearing a success
+ * response.
  */
 export async function drainPages(
   fetch: (cursor: unknown) => Promise<QueryPage>,
+  maxPages = DEFAULT_MAX_PAGES,
+  label = "query",
 ): Promise<StoreItem[]> {
   const out: StoreItem[] = [];
   let cursor: unknown = undefined;
+  let pages = 0;
   do {
     const page = await fetch(cursor);
     out.push(...page.items);
     cursor = page.cursor;
+    if (++pages >= maxPages && cursor) {
+      throw new DynamoDBAdapterError(
+        `better-auth-dynamodb: ${label} exceeded maxPages (${maxPages}) with ` +
+          `more pages remaining. Raise maxPages or narrow the query — ` +
+          `returning a partial result here would silently drop rows.`,
+      );
+    }
   } while (cursor);
   return out;
 }
 
 function matchOne(item: StoreItem, w: CleanedWhere): boolean {
-  const actual = item[w.field];
-  const expected = w.value;
+  // `mode: "insensitive"` asks for case-insensitive comparison. It only has
+  // meaning between two strings; anything else keeps exact semantics.
+  const fold = (v: unknown): unknown =>
+    w.mode === "insensitive" && typeof v === "string" ? v.toLowerCase() : v;
+
+  const actual = fold(item[w.field]) as any;
+  const expected = Array.isArray(w.value)
+    ? (w.value as unknown[]).map(fold)
+    : fold(w.value);
   switch (w.operator) {
     case "eq":
       return actual === expected;
@@ -40,9 +65,9 @@ function matchOne(item: StoreItem, w: CleanedWhere): boolean {
     case "gte":
       return actual >= (expected as any);
     case "in":
-      return Array.isArray(expected) && (expected as any[]).includes(actual);
+      return Array.isArray(expected) && expected.includes(actual);
     case "not_in":
-      return Array.isArray(expected) && !(expected as any[]).includes(actual);
+      return Array.isArray(expected) && !expected.includes(actual);
     case "contains":
       return String(actual).includes(String(expected));
     case "starts_with":

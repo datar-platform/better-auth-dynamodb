@@ -8,6 +8,7 @@ import type { StoreItem } from "./types";
  * `where` clause before applying any residual (in-memory) filtering.
  *
  * - `byId`      — a direct primary-key get (the cheapest path).
+ * - `byIds`     — a bounded set of primary-key gets (`id in [...]`).
  * - `index`     — a logical index query with a resolved partition/sort key.
  * - `listByType`— no index matched; list all rows of the model and filter.
  *
@@ -16,12 +17,25 @@ import type { StoreItem } from "./types";
  */
 export type QueryPlan =
   | { kind: "byId"; id: string; residual: CleanedWhere[] }
+  | { kind: "byIds"; ids: string[]; residual: CleanedWhere[] }
   | { kind: "index"; index: string; key: StoreItem; residual: CleanedWhere[] }
   | { kind: "listByType"; residual: CleanedWhere[] };
 
-/** A clause usable for index selection: `eq`, `AND`-connected. */
+/**
+ * A clause usable for index selection: `eq`, `AND`-connected, case-sensitive.
+ *
+ * `mode: "insensitive"` is deliberately excluded. DynamoDB keys are compared
+ * byte-for-byte, so serving a case-insensitive equality from an index would
+ * silently miss every row whose casing differs from the query. Those clauses
+ * stay residual and are matched in memory instead.
+ */
 function isKeyable(w: CleanedWhere): boolean {
-  return w.operator === "eq" && w.connector === "AND" && w.value != null;
+  return (
+    w.operator === "eq" &&
+    w.connector === "AND" &&
+    w.value != null &&
+    w.mode !== "insensitive"
+  );
 }
 
 /**
@@ -48,6 +62,24 @@ export function planQuery(
       kind: "byId",
       id: String(idClause.value),
       residual: where.filter((w) => w !== idClause),
+    };
+  }
+
+  // `id in [...]` is a bounded set of primary-key gets, not a scan. Better
+  // Auth uses it to batch-load rows it already has the ids for (loading an
+  // organization's members, for instance), and DynamoDB serves it directly.
+  const idIn = where.find(
+    (w) =>
+      w.field === "id" &&
+      w.operator === "in" &&
+      w.connector === "AND" &&
+      Array.isArray(w.value),
+  );
+  if (idIn) {
+    return {
+      kind: "byIds",
+      ids: (idIn.value as unknown[]).map(String),
+      residual: where.filter((w) => w !== idIn),
     };
   }
 

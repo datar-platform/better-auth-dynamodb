@@ -8,6 +8,8 @@ export default defineConfig({
     testTimeout: 60000,
     hookTimeout: 60000,
     include: ["src/**/*.{test,spec}.{js,ts}", "test/**/*.{test,spec}.{js,ts}"],
-    exclude: ["**/node_modules/**", "**/dist/**"],
+    // Docker-backed suites live in their own config (`pnpm test:integration`)
+    // so the default gate needs nothing but Node.
+    exclude: ["**/node_modules/**", "**/dist/**", "test/integration/**"],
   },
 });

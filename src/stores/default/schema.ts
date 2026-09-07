@@ -5,6 +5,7 @@ import type {
 import {
   CreateTableCommand,
   ResourceInUseException,
+  UpdateTimeToLiveCommand,
   waitUntilTableExists,
 } from "@aws-sdk/client-dynamodb";
 
@@ -78,6 +79,12 @@ export async function ensureSchema(opts: {
   client: DynamoDBClient;
   tableName: string;
   lookupSlots: number;
+  /**
+   * Enable DynamoDB TTL on this attribute. Pass the same value the adapter is
+   * configured with (`ttl.attributeName`, default `__ba_ttl`) — the adapter
+   * writes the attribute, but only the table setting makes AWS act on it.
+   */
+  ttlAttribute?: string;
 }): Promise<void> {
   const input = buildTableDefinition(opts.tableName, opts.lookupSlots);
   try {
@@ -89,7 +96,32 @@ export async function ensureSchema(opts: {
     { client: opts.client, maxWaitTime: 60 },
     { TableName: opts.tableName },
   );
+
+  if (!opts.ttlAttribute) return;
+  try {
+    await opts.client.send(
+      new UpdateTimeToLiveCommand({
+        TableName: opts.tableName,
+        TimeToLiveSpecification: {
+          Enabled: true,
+          AttributeName: opts.ttlAttribute,
+        },
+      }),
+    );
+  } catch (error) {
+    // Re-enabling TTL on the same attribute is a no-op AWS reports as an
+    // error; anything else is a real provisioning failure.
+    if (!isAlreadyEnabled(error)) throw error;
+  }
 }
+
+const isAlreadyEnabled = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  "name" in error &&
+  (error as { name?: unknown }).name === "ValidationException" &&
+  typeof (error as unknown as { message?: unknown }).message === "string" &&
+  (error as unknown as { message: string }).message.includes("already");
 
 /**
  * Better Auth CLI `generate` hook: emit a portable CloudFormation template for
@@ -101,8 +133,20 @@ export function generateSchemaFile(opts: {
   tableName: string;
   lookupSlots: number;
   file?: string;
+  /** When set, the template enables DynamoDB TTL on this attribute. */
+  ttlAttribute?: string;
 }): { code: string; path: string; overwrite: boolean } {
-  const table = buildTableDefinition(opts.tableName, opts.lookupSlots);
+  const table = {
+    ...buildTableDefinition(opts.tableName, opts.lookupSlots),
+    ...(opts.ttlAttribute
+      ? {
+          TimeToLiveSpecification: {
+            Enabled: true,
+            AttributeName: opts.ttlAttribute,
+          },
+        }
+      : {}),
+  };
   const template = {
     AWSTemplateFormatVersion: "2010-09-09",
     Resources: {

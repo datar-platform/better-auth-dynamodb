@@ -1,3 +1,4 @@
+import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { DBAdapterDebugLogOption } from "@better-auth/core/db/adapter";
 
 import type { IndexMap } from "./index-map";
@@ -107,6 +108,26 @@ export interface DynamoStore {
 }
 
 /**
+ * Adapter-managed DynamoDB TTL.
+ *
+ * A configured date field (e.g. `session.expiresAt`) is projected into a
+ * numeric epoch-seconds attribute that DynamoDB's own TTL reaper understands,
+ * so expired auth rows are deleted for free instead of accumulating.
+ *
+ * Reads treat the same attribute as *logical* expiry. DynamoDB reaps lazily —
+ * often a day or two late — so without that, an expired session would keep
+ * working until AWS got round to deleting it.
+ */
+export interface TtlOptions {
+  /** DynamoDB TTL attribute to write. Defaults to `__ba_ttl`. */
+  attributeName?: string;
+  /** Per-model date field, e.g. `{ session: "expiresAt" }`. */
+  fields?: Record<string, string>;
+  /** Date field used for any model not named in `fields`, e.g. `"expiresAt"`. */
+  defaultField?: string;
+}
+
+/**
  * Public configuration for {@link dynamoAdapter}.
  *
  * Omit `store` to use the built-in single-table store (needs `tableName`).
@@ -127,6 +148,41 @@ export interface DynamoAdapterConfig {
    * at DynamoDB Local or LocalStack, e.g. `http://localhost:4566`.
    */
   endpoint?: string;
+  /**
+   * Pre-built DynamoDB document client (used only by the built-in store).
+   * Preferred in production: your application keeps ownership of credentials,
+   * region, middleware, tracing, and marshalling behaviour.
+   */
+  documentClient?: DynamoDBDocumentClient;
+  /**
+   * Enforce `unique` schema fields with transactional marker rows (used only
+   * by the built-in store). Default `true`.
+   */
+  atomicUniqueness?: boolean;
+  /**
+   * Maximum DynamoDB pages drained for one logical query. Default 25. When a
+   * query still has pages left at the cap, the adapter throws rather than
+   * returning a silently truncated result — a partial answer to an auth query
+   * is worse than a loud failure.
+   */
+  maxPages?: number;
+  /**
+   * Per-request DynamoDB `Limit` (used only by the built-in store). Pagination
+   * is still drained up to `maxPages`, so this changes request sizing only.
+   */
+  pageSize?: number;
+  /** Adapter-managed DynamoDB TTL. Omit (or `false`) to disable entirely. */
+  ttl?: TtlOptions | false;
+  /**
+   * Allow queries that no index can serve, which fall back to draining every
+   * row of the model and filtering in memory. Default `false`, so an access
+   * pattern nobody designed for fails at development time instead of quietly
+   * costing a full model read on every call.
+   *
+   * Native `count` is unaffected: it is a keyed `Select: COUNT` query, bounded
+   * by `maxPages`, and returns a number rather than every row.
+   */
+  unsafeAllowScan?: boolean;
   /** Better Auth debug logging, forwarded to the adapter factory. */
   debugLogs?: DBAdapterDebugLogOption;
 }

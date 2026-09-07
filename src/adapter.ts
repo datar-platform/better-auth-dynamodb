@@ -3,11 +3,13 @@ import type { BetterAuthOptions } from "better-auth";
 import type { AdapterFactory } from "better-auth/adapters";
 import { createAdapterFactory } from "better-auth/adapters";
 
+import { UnsupportedQueryError } from "./errors";
 import type { QueryPlan } from "./planner";
 import type { DynamoAdapterConfig, DynamoStore, StoreItem } from "./types";
 import {
   applySort,
   applyWindow,
+  DEFAULT_MAX_PAGES,
   drainPages,
   matchesResidual,
 } from "./pagination";
@@ -57,14 +59,20 @@ export const dynamoAdapter = (
           : data,
     },
 
-    adapter: ({ schema, debugLog, getDefaultModelName }) => {
+    adapter: ({ schema, debugLog, getDefaultModelName, getFieldName }) => {
       const indexMap = config.indexMap ?? deriveIndexMap(schema);
+      const maxPages = config.maxPages ?? DEFAULT_MAX_PAGES;
       const store: DynamoStore =
         config.store ??
         createSingleTableStore({
           tableName: config.tableName,
           region: config.region,
           endpoint: config.endpoint,
+          documentClient: config.documentClient,
+          atomicUniqueness: config.atomicUniqueness,
+          maxPages,
+          pageSize: config.pageSize,
+          ttl: config.ttl,
           indexMap,
         });
 
@@ -81,18 +89,38 @@ export const dynamoAdapter = (
         if (plan.kind === "byId") {
           const one = await store.getById(model, plan.id);
           candidates = one ? [one] : [];
+        } else if (plan.kind === "byIds") {
+          const found = await mapBatched(plan.ids, (id) =>
+            store.getById(model, id),
+          );
+          candidates = found.filter((item): item is StoreItem => item !== null);
         } else if (plan.kind === "index") {
-          candidates = await drainPages((cursor) =>
-            store.queryIndex({
-              model,
-              index: plan.index,
-              key: plan.key,
-              cursor,
-            }),
+          candidates = await drainPages(
+            (cursor) =>
+              store.queryIndex({
+                model,
+                index: plan.index,
+                key: plan.key,
+                cursor,
+              }),
+            maxPages,
+            `index query on "${model}"`,
           );
         } else {
-          candidates = await drainPages((cursor) =>
-            store.listByType({ model, cursor }),
+          if (!config.unsafeAllowScan) {
+            throw new UnsupportedQueryError(
+              `better-auth-dynamodb: no index can serve this query on ` +
+                `"${model}" (${describeWhere(clauses)}), so it would have to ` +
+                `read every row of the model and filter in memory. Add the ` +
+                `field to the index map — or to the Better Auth schema as ` +
+                `\`unique\`, \`references\`, or \`index: true\` — or set ` +
+                `\`unsafeAllowScan: true\` to accept the cost.`,
+            );
+          }
+          candidates = await drainPages(
+            (cursor) => store.listByType({ model, cursor }),
+            maxPages,
+            `model scan of "${model}"`,
           );
         }
         return candidates.filter((item) =>
@@ -106,9 +134,36 @@ export const dynamoAdapter = (
         where: CleanedWhere[],
       ): Promise<string | null> => {
         const plan: QueryPlan = planQuery(model, where, indexMap);
-        if (plan.kind === "byId") return plan.id;
+        // The shortcut is only sound when `id` was the *whole* predicate.
+        // `where: [id = x, status = "active"]` must still check the status, or
+        // a guarded update would fire against a row that does not qualify.
+        if (plan.kind === "byId" && plan.residual.length === 0) return plan.id;
         const [first] = await queryAll(model, where);
         return first ? String(first.id) : null;
+      };
+
+      /**
+       * Narrow rows to the requested fields. Better Auth asks for projection at
+       * the API surface; DynamoDB could do it server-side, but only by giving
+       * up the reserved key attributes the store needs, so it happens here.
+       */
+      const project = (
+        model: string,
+        items: StoreItem[],
+        select?: string[],
+      ): StoreItem[] => {
+        if (!select?.length) return items;
+        // `select` arrives in Better Auth's field names; rows are stored under
+        // whatever `fieldName` the schema maps them to, so the names have to be
+        // translated before picking or every field comes back undefined.
+        const stored = select.map((field) => getFieldName({ model, field }));
+        return items.map((item) => {
+          const picked: StoreItem = {};
+          for (const field of stored) {
+            if (field in item) picked[field] = item[field];
+          }
+          return picked;
+        });
       };
 
       return {
@@ -187,12 +242,14 @@ export const dynamoAdapter = (
         async findOne<T>({
           model,
           where,
+          select,
         }: {
           model: string;
           where: CleanedWhere[];
+          select?: string[];
         }) {
           const m = getDefaultModelName(model);
-          const [first] = await queryAll(m, where);
+          const [first] = project(m, await queryAll(m, where), select);
           return (first ?? null) as T | null;
         },
 
@@ -202,18 +259,26 @@ export const dynamoAdapter = (
           limit,
           sortBy,
           offset,
+          select,
         }: {
           model: string;
           where?: CleanedWhere[];
           limit: number;
           sortBy?: { field: string; direction: "asc" | "desc" };
           offset?: number;
+          select?: string[];
         }) {
           const m = getDefaultModelName(model);
-          const items = applyWindow(
-            applySort(await queryAll(m, where), sortBy),
-            offset,
-            limit,
+          // Projection runs last: sorting by a field the caller did not select
+          // must still work.
+          const items = project(
+            m,
+            applyWindow(
+              applySort(await queryAll(m, where), sortBy),
+              offset,
+              limit,
+            ),
+            select,
           );
           return items as T[];
         },
@@ -229,13 +294,20 @@ export const dynamoAdapter = (
           const clauses = where ?? [];
           const plan = planQuery(m, clauses, indexMap);
           // Fast path: no residual predicates and the store can count natively.
+          // Only for the two plans a native count actually describes — counting
+          // a `byId`/`byIds` plan this way would count the whole model instead.
           if (plan.residual.length === 0 && store.count) {
-            const fast = await store.count(
-              plan.kind === "index"
-                ? { model: m, index: plan.index, key: plan.key }
-                : { model: m },
-            );
-            if (fast != null) return fast;
+            if (plan.kind === "index") {
+              const fast = await store.count({
+                model: m,
+                index: plan.index,
+                key: plan.key,
+              });
+              if (fast != null) return fast;
+            } else if (plan.kind === "listByType") {
+              const fast = await store.count({ model: m });
+              if (fast != null) return fast;
+            }
           }
           return (await queryAll(m, clauses)).length;
         },
@@ -303,6 +375,25 @@ export const dynamoAdapter = (
     },
   });
 };
+
+/** Render a `where` for an error message, without leaking the values. */
+function describeWhere(where: CleanedWhere[]): string {
+  if (where.length === 0) return "no where clause";
+  return where.map((w) => `${w.field} ${w.operator}`).join(", ");
+}
+
+/** Map items through an async op in small concurrent chunks, keeping order. */
+async function mapBatched<T, R>(
+  items: T[],
+  op: (item: T) => Promise<R>,
+  chunkSize = 10,
+): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    out.push(...(await Promise.all(items.slice(i, i + chunkSize).map(op))));
+  }
+  return out;
+}
 
 /** Run an async op over items in small concurrent chunks to avoid throttling. */
 async function runBatched<T>(
