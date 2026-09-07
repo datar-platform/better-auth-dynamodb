@@ -3,8 +3,11 @@
 A generic [DynamoDB](https://aws.amazon.com/dynamodb/) adapter for [Better Auth](https://better-auth.com).
 
 - **Works out of the box** with any Better Auth model or plugin — the built-in
-  single-table store derives its indexes from your schema (`unique` fields and
-  foreign keys), so two-factor, passkey, API-key, organization, etc. just work.
+  single-table store derives its indexes from your schema (`unique` fields,
+  foreign keys, and anything marked `index: true`), so two-factor, passkey,
+  API-key, organization, etc. work with no per-model configuration. Queries no
+  index can serve are refused rather than silently scanned, so an access pattern
+  nobody designed for shows up in development (see `unsafeAllowScan`).
 - **Bring your own store.** The adapter talks to a small `DynamoStore` seam, so
   you can back it with an existing single-table design (ElectroDB, custom key
   encoding, a shared table) without changing the adapter.
@@ -25,6 +28,9 @@ A generic [DynamoDB](https://aws.amazon.com/dynamodb/) adapter for [Better Auth]
 ```bash
 npm install @datar-platform/better-auth-dynamodb @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
 ```
+
+Requires `better-auth` 1.7 or newer, and Node 22 or newer. On `better-auth`
+1.5/1.6, stay on 0.1.x.
 
 ## Quick start (built-in single-table store)
 
@@ -131,12 +137,24 @@ Better Auth's own enforcement is a check-then-insert, which both racers can
 pass. Set `atomicUniqueness: false` to fall back to it and halve the write cost
 of creates.
 
-Two caveats worth knowing:
+Two things worth knowing:
 
-- Markers are created by writes made on 0.2.0+. Upgrading an existing table
-  enforces uniqueness going forward; it does not find duplicates already there.
+- On a table upgraded from 0.1.x, markers only cover rows written since the
+  upgrade until you run [`migrateKeys()`](#upgrading-from-01x), which backfills
+  them for the rows already there.
 - Do not write Better Auth rows into the table with a raw `PutItem`. Entity
   rows, index keys, markers, and TTL attributes have to move together.
+
+A write that loses a uniqueness race throws `UniqueConstraintError`, so you can
+tell "this email is taken" apart from a failed write:
+
+```ts
+import { UniqueConstraintError } from "@datar-platform/better-auth-dynamodb";
+```
+
+`DynamoDBAdapterError` is the base of everything this package throws;
+`UnsupportedQueryError` and `OptimisticLockError` are the other two you might
+catch by name.
 
 ## Bring your own store
 
@@ -171,7 +189,10 @@ const store: DynamoStore = {
   listByType({ model }) {
     /* list all rows of a model */
   },
-  // optional: count(), createSchema()
+  // Optional, and worth implementing: `consumeOne` (atomic delete-and-return,
+  // which is what stops a one-time code being used twice) and `incrementOne`
+  // (atomic counter). Without them the adapter falls back to a non-atomic
+  // get-then-write. Also optional: `count()`, `createSchema()`.
 };
 
 // Describe which fields each model is looked up by:
@@ -187,10 +208,12 @@ const indexMap: IndexMap = {
 betterAuth({ database: dynamoAdapter({ store, indexMap }) });
 ```
 
-Given a `where`, the adapter picks the first access pattern whose partition-key
-fields are all present (attaching any leading sort-key fields), then filters any
-remaining predicates in memory. Provide an `indexMap` to match your table, or
-omit it to auto-derive from the schema.
+Given a `where`, the adapter takes the cheapest path it can prove: an `id`
+equality becomes a direct get, an `id in [...]` becomes a bounded set of gets,
+and otherwise it picks the first access pattern whose partition-key fields are
+all present (attaching any leading sort-key fields). Whatever the chosen path
+does not cover is filtered in memory. Provide an `indexMap` to match your table,
+or omit it to auto-derive from the schema.
 
 ## Configuration
 

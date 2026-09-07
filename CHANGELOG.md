@@ -1,5 +1,24 @@
 # @datar-platform/better-auth-dynamodb
 
+## 0.2.2
+
+Documentation only — no runtime change.
+
+- The uniqueness section still said markers "do not find duplicates already
+  there", which 0.2.1's `migrateKeys()` made untrue, and which contradicted the
+  upgrade section a few paragraphs above it.
+- The install step now states the `better-auth >= 1.7` and Node >= 22
+  requirements, rather than leaving them to be discovered as a peer error.
+- The opening claim that any model or plugin "just works" now says what the
+  no-hidden-scan default actually does, instead of implying every query is
+  served.
+- Documents the exported error types, so a caller can tell "this email is taken"
+  from a failed write by catching `UniqueConstraintError`.
+- The query-planning description covers the `id` and `id in [...]` paths added
+  in 0.2.0, not only index selection.
+- The bring-your-own-store sketch calls out `consumeOne`/`incrementOne` — they
+  are optional, but they are what makes single-use codes and counters atomic.
+
 ## 0.2.1
 
 ### Added
